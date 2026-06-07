@@ -1,4 +1,7 @@
-# QFTP — QUIC File Transfer Protocol (Part 3 Implementation)
+# QFTP — QUIC File Transfer Protocol (Phase 3 Implementation)
+
+CS 544 Computer Networks — Term Project Part 3
+Ryan Varughese — Professor Brian Mitchell
 
 QFTP is a stateful, download-only, authenticated, resumable file-transfer
 protocol that runs on top of QUIC (RFC 9000). This repository is the Phase 3
@@ -141,7 +144,87 @@ qftp-impl/
 
 ---
 
-## Notes for Grading
+## What Implementation Taught Me About the Design
+
+Software design is a feedback loop: building the protocol surfaced gaps and
+ambiguities in the Phase 2 specification that were not visible on paper. This
+section documents the design changes the implementation forced, and the
+decisions it validated.
+
+### 1. Stream directionality: the data stream cannot be client-opened
+
+The Phase 2 spec described QFTP as running over *two unidirectional streams,
+both opened by the client* — one for control, one for data. Implementing this
+immediately exposed a contradiction: a client-opened unidirectional QUIC stream
+can only carry bytes from client to server, yet almost every QFTP reply travels
+server-to-client (HELLO_ACK, AUTH_RESPONSE, FILE_METADATA, and every
+DATA_CHUNK). With both streams unidirectional and client-owned, the server would
+have had no way to answer.
+
+The implementation resolves this with two changes:
+
+* The **control stream is a client-opened *bidirectional* stream.** Control is
+  inherently a two-way conversation (request/response), so a bidirectional
+  stream is the natural fit, and the client still initiates it by sending HELLO.
+* The **data stream is a *server-opened* unidirectional stream.** Bulk file data
+  only ever flows server-to-client, which is exactly what a server-initiated
+  unidirectional stream expresses. The server opens it when a transfer begins.
+
+This preserves the design's real intent — keeping bulk data off the control
+stream so a long transfer cannot head-of-line-block control messages — while
+correcting the ownership/direction model to something QUIC can actually express.
+Phase 2's "two streams, control vs. data" idea was sound; only the directionality
+labels were wrong.
+
+### 2. TRANSFER_COMPLETE is bounded by byte count, not message arrival
+
+The Phase 2 DFA treats `TRANSFERRING --recv TRANSFER_COMPLETE--> READY` as a
+clean transition, implicitly assuming TRANSFER_COMPLETE is the last thing the
+client sees. Once control and data live on *separate* QUIC streams (see #1),
+that assumption breaks: QUIC multiplexes streams independently, so the small
+TRANSFER_COMPLETE message on the control stream can arrive *before* the final
+bulk DATA_CHUNK on the data stream. A literal DFA would move to READY on
+TRANSFER_COMPLETE and then reject the late DATA_CHUNK as an illegal transition.
+
+The fix is a small but important refinement to the protocol's completion
+semantics: **the end of a transfer is defined by having received all promised
+bytes, not by the arrival of the TRANSFER_COMPLETE message.** The client buffers
+the TRANSFER_COMPLETE and defers the state transition until its received byte
+count reaches the `bytes_sent` value the message carried. All DATA_CHUNK
+self-loops therefore occur (validly) while still in TRANSFERRING, and the single
+transition to READY fires last. The `bytes_sent` field in TRANSFER_COMPLETE,
+which looked redundant in Phase 2 (the client could already count bytes), turns
+out to be exactly the value needed to make this robust.
+
+### 3. Keeping enum values in lockstep with the spec
+
+While writing `constants.py`, I reconciled the AuthStatus, ErrorCode, and
+AbortReason enums against the figures in Phase 2 Sections 2.4.4, 2.4.12, and
+2.4.11. This caught a discrepancy in the error-code set: the ordering and the
+use of `ERR_INTERNAL = 0x00FF` as a high-valued sentinel (rather than the next
+sequential value) had to be reflected exactly in code. Minor on its own, but a
+concrete reminder that the wire-level constants are part of the contract — a
+client and server that disagree on a single integer will misinterpret every
+error.
+
+### 4. Decisions the implementation validated
+
+Not every lesson was a correction. Two Phase 2 choices proved their worth:
+
+* **The 12-byte header with an explicit `payload_len`.** QUIC delivers a stream
+  as an undifferentiated sequence of bytes, so the receiver must re-frame
+  individual messages itself. The `payload_len` field makes this trivial — read
+  the header, read exactly that many more bytes — and is the foundation of the
+  `FrameBuffer` reassembly logic. A delimiter-based design would have been far
+  more fragile.
+* **Splitting HANDSHAKING and AUTHENTICATING into distinct states.** Keeping the
+  version handshake separate from the credential exchange kept both the server
+  and client transition logic clean; the auth-retry loop lives entirely within
+  AUTHENTICATING without ever entangling version negotiation.
+
+---
+
+## Where to Find Each Requirement
 
 - **Kernel:** `aioquic` supplies QUIC only. All QFTP framing, serialization,
   parsing, and state logic in `qftp/` is original.
