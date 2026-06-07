@@ -1,7 +1,4 @@
-# QFTP — QUIC File Transfer Protocol (Phase 3 Implementation)
-
-CS 544 Computer Networks — Term Project Part 3
-Ryan Varughese — Professor Brian Mitchell
+# QFTP — QUIC File Transfer Protocol (Part 3 Implementation)
 
 QFTP is a stateful, download-only, authenticated, resumable file-transfer
 protocol that runs on top of QUIC (RFC 9000). This repository is the Phase 3
