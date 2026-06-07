@@ -1,0 +1,2 @@
+Hello from the QFTP server.
+This is a small sample text file used for testing downloads.
